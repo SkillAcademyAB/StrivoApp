@@ -10,11 +10,11 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
-    options.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    options.SwaggerDoc("v1", new Microsoft.OpenApi.OpenApiInfo
     {
         Title   = "StrivoApp API",
         Version = "v1",
-        Description = "A demonstration REST API built with ASP.NET Core 8."
+        Description = "A demonstration REST API built with ASP.NET Core 10."
     });
 });
 
