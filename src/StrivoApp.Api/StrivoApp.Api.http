@@ -1,0 +1,31 @@
+@StrivoApp.Api_HostAddress = http://localhost:5232
+
+GET {{StrivoApp.Api_HostAddress}}/api/Items
+Accept: application/json
+
+###
+
+GET {{StrivoApp.Api_HostAddress}}/api/Items/1
+Accept: application/json
+
+###
+
+POST {{StrivoApp.Api_HostAddress}}/api/Items
+Content-Type: application/json
+
+{
+  "name": "New Item",
+  "description": "Created via HTTP file"
+}
+
+###
+
+PUT {{StrivoApp.Api_HostAddress}}/api/Items/1
+Content-Type: application/json
+
+{
+  "name": "Updated Item",
+  "description": "Updated via HTTP file"
+}
+
+###
