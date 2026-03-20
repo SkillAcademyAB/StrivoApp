@@ -1,0 +1,76 @@
+# One-time bootstrap workflow that creates the federated identity credential on
+# the Azure AD app registration so that the main deployment workflow can use
+# OIDC (passwordless) authentication.
+#
+# Prerequisites (add these to Settings → Secrets and variables → Actions):
+#   AZURE_CLIENT_ID       – Application (client) ID of the app registration
+#   AZURE_TENANT_ID       – Azure AD tenant ID
+#   AZURE_SUBSCRIPTION_ID – Azure subscription ID
+#   AZURE_CLIENT_SECRET   – A temporary client secret on the app registration
+#                           (needed only for this one-time setup; can be deleted
+#                            after the federated credential is in place)
+#
+# How to run:
+#   1. Add the four secrets listed above to the repository.
+#   2. Go to Actions → "Setup Azure OIDC Federated Credential" → Run workflow.
+#   3. Type "yes" in the confirmation prompt and click "Run workflow".
+#   4. After the workflow succeeds, delete the AZURE_CLIENT_SECRET secret.
+#   5. The main deployment workflow will now authenticate via OIDC.
+
+name: Setup Azure OIDC Federated Credential
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >
+          Type "yes" to create (or update) the federated identity credential on
+          the Azure AD app registration. Any other value is a no-op dry-run.
+        required: true
+        default: 'no'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Azure (client secret)
+        run: |
+          az login \
+            --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant  "${{ secrets.AZURE_TENANT_ID }}"
+          az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Create federated identity credential
+        if: ${{ github.event.inputs.confirm == 'yes' }}
+        run: |
+          az ad app federated-credential create \
+            --id "${{ secrets.AZURE_CLIENT_ID }}" \
+            --parameters '{
+              "name": "github-actions-main",
+              "issuer": "https://token.actions.githubusercontent.com",
+              "subject": "repo:${{ github.repository }}:ref:refs/heads/main",
+              "description": "Allow GitHub Actions on the main branch to authenticate via OIDC",
+              "audiences": ["api://AzureADTokenExchange"]
+            }'
+          echo "Federated credential created successfully."
+          echo "You can now delete the AZURE_CLIENT_SECRET secret from this repository."
+
+      - name: Dry-run (confirm was not 'yes')
+        if: ${{ github.event.inputs.confirm != 'yes' }}
+        run: |
+          echo "Dry-run: no changes were made."
+          echo "Re-run with confirm=yes to create the federated credential."
+          echo ""
+          echo "The following federated credential would be created:"
+          echo "  name:    github-actions-main"
+          echo "  issuer:  https://token.actions.githubusercontent.com"
+          echo "  subject: repo:${{ github.repository }}:ref:refs/heads/main"
+
+      - name: Log out of Azure
+        if: always()
+        run: az logout || true

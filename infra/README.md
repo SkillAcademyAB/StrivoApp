@@ -15,7 +15,7 @@ The goal is to make the infrastructure **reproducible, version-controlled, and a
 | Infrastructure provisioning | ✅ Bicep template (`infra/main.bicep`) |
 | IaC deployment in CI/CD | ✅ `infra` job wired into the pipeline |
 | App Service Plan | ✅ Shared external plan `asp-dataconsumer` in `rg-day1-bear` |
-| OIDC authentication | ✅ All three jobs use `azure/login@v2` — no long-lived secrets |
+| OIDC authentication | ✅ All three jobs use `azure/login@v3` — no long-lived secrets |
 | Parameter file | ✅ `infra/main.bicepparam` holds all production values |
 
 ---
@@ -26,7 +26,8 @@ The goal is to make the infrastructure **reproducible, version-controlled, and a
 StrivoApp/
 ├── .github/
 │   └── workflows/
-│       └── main_dataconsumerdemo.yml   # CI/CD pipeline (build → infra → deploy)
+│       ├── main_dataconsumerdemo.yml   # CI/CD pipeline (build → infra → deploy)
+│       └── setup-azure-oidc.yml        # One-time bootstrap: creates federated credential
 ├── infra/
 │   ├── main.bicep                      # Azure Web App + config resources
 │   ├── main.bicepparam                 # Production parameter values
@@ -107,13 +108,42 @@ These three secrets must be added to the repository (**Settings → Secrets and 
 
 ### Azure prerequisites (one-time setup)
 
-1. **Create or reuse a service principal / app registration** in Azure AD.
-2. **Add a federated credential** on the app registration:
-   - *Issuer*: `https://token.actions.githubusercontent.com`
-   - *Subject*: `repo:SkillAcademyAB/StrivoApp:ref:refs/heads/main`
-   - *Audience*: `api://AzureADTokenExchange`
+The `infra` and `deploy` jobs authenticate to Azure via OIDC (no passwords).  
+This requires a **federated identity credential** to exist on the Azure AD app registration.
+
+#### Automated setup (recommended)
+
+A dedicated workflow automates this one-time step:
+
+1. Create a **temporary client secret** on the app registration (Azure Portal → App Registrations → *your app* → Certificates & secrets → New client secret).
+2. Add four secrets to the GitHub repository (**Settings → Secrets and variables → Actions**):
+   | Secret name | Value |
+   |---|---|
+   | `AZURE_CLIENT_ID` | Application (client) ID |
+   | `AZURE_TENANT_ID` | Azure AD Tenant ID |
+   | `AZURE_SUBSCRIPTION_ID` | Azure Subscription ID |
+   | `AZURE_CLIENT_SECRET` | The temporary client secret from step 1 |
+3. Go to **Actions → "Setup Azure OIDC Federated Credential" → Run workflow**, type `yes` in the confirmation field, and click **Run workflow**.
+4. Once the workflow succeeds, **delete the `AZURE_CLIENT_SECRET`** secret from the repository — it is no longer needed.
+5. The main deployment workflow will now authenticate via OIDC.
+
+#### Manual setup (alternative)
+
+Run the following Azure CLI command locally (requires `Application Administrator` or app **Owner** rights):
+
+```sh
+az ad app federated-credential create \
+  --id "<AZURE_CLIENT_ID>" \
+  --parameters '{
+    "name": "github-actions-main",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "subject": "repo:SkillAcademyAB/StrivoApp:ref:refs/heads/main",
+    "audiences": ["api://AzureADTokenExchange"]
+  }'
+```
+
 3. **Assign the `Contributor` role** to the service principal on the `rg-day1-bear` resource group.
-4. Add the three secrets above to the GitHub repository.
+4. Add the three OIDC secrets above to the GitHub repository.
 
 ---
 
@@ -133,7 +163,8 @@ These three secrets must be added to the repository (**Settings → Secrets and 
 ## Next steps (suggested order)
 
 - [ ] Add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` secrets to the repository (manual — GitHub Settings).
-- [ ] Create federated credential on the service principal and assign `Contributor` role (see Azure prerequisites above).
-- [ ] Trigger the workflow on this branch to validate the Bicep deployment end-to-end.
+- [ ] Create federated credential using the **Setup Azure OIDC Federated Credential** workflow (see Azure prerequisites above).
+- [ ] Assign `Contributor` role to the service principal on the `rg-day1-bear` resource group.
+- [ ] Trigger the main deployment workflow on `main` to validate the Bicep deployment end-to-end.
 - [ ] Open a GitHub Issue to track environment promotion (`dev` → `staging` → `production` with separate `.bicepparam` files and workflow environment gates).
 - [ ] Open a GitHub Issue to track Key Vault integration for sensitive app settings.
