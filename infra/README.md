@@ -43,7 +43,7 @@ StrivoApp/
 
 | Resource type | Name | Purpose |
 |---|---|---|
-| `Microsoft.Web/sites` | `DataConsumerDemo` | The App Service Web App |
+| `Microsoft.Web/sites` | `DemoIaCApp` | The App Service Web App |
 | `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `ftp` | FTP publishing policy (disabled) |
 | `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `scm` | SCM (Kudu) publishing policy (disabled) |
 | `Microsoft.Web/sites/config` | `web` | App Service configuration (runtime, TLS, etc.) |
@@ -52,7 +52,7 @@ StrivoApp/
 
 | Parameter | Default | Description |
 |---|---|---|
-| `siteName` | `DataConsumerDemo` | Web App name |
+| `siteName` | `DemoIaCApp` | Web App name |
 | `appServicePlanId` | _(required)_ | Resource ID of the App Service Plan to use |
 | `location` | `Sweden Central` | Azure region |
 

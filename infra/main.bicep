@@ -1,10 +1,10 @@
 // ============================================================
 // StrivoApp — Azure Web App Infrastructure
-// Based on the exported template for DataConsumerDemo
+// Based on the exported template for DemoIaCApp
 // ============================================================
 
 @description('Name of the Azure App Service (Web App).')
-param siteName string = 'DataConsumerDemo'
+param siteName string = 'DemoIaCApp'
 
 @description('Resource ID of an existing App Service Plan to host the Web App.')
 param appServicePlanId string

@@ -10,6 +10,6 @@
 // ============================================================
 using './main.bicep'
 
-param siteName = 'DataConsumerDemo'
+param siteName = 'DemoIaCApp'
 param location = 'Sweden Central'
 param appServicePlanId = '/subscriptions/03692fc9-40be-48b5-b035-4363056559bd/resourceGroups/rg-day1-bear/providers/Microsoft.Web/serverfarms/asp-dataconsumer'
