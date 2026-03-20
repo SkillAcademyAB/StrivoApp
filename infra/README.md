@@ -17,6 +17,7 @@ The goal is to make the infrastructure **reproducible, version-controlled, and a
 | App Service Plan | ✅ Shared external plan `asp-dataconsumer` in `rg-day1-bear` |
 | OIDC authentication | ✅ All three jobs use `azure/login@v3` — no long-lived secrets |
 | Parameter file | ✅ `infra/main.bicepparam` holds all production values |
+| Entra ID app registration | ⏳ Created by `setup-azure-oidc.yml` bootstrap workflow (run once) |
 
 ---
 
@@ -27,8 +28,9 @@ StrivoApp/
 ├── .github/
 │   └── workflows/
 │       ├── main_dataconsumerdemo.yml   # CI/CD pipeline (build → infra → deploy)
-│       └── setup-azure-oidc.yml        # One-time bootstrap: creates federated credential
+│       └── setup-azure-oidc.yml        # One-time bootstrap: creates app, SP, roles, federated credential
 ├── infra/
+│   ├── aad-app.bicep                   # Entra ID app registration + service principal (IaC)
 │   ├── main.bicep                      # Azure Web App + config resources
 │   ├── main.bicepparam                 # Production parameter values
 │   └── README.md                       # This file
@@ -106,44 +108,100 @@ These three secrets must be added to the repository (**Settings → Secrets and 
 
 > No `AZURE_RESOURCE_GROUP` variable is needed — the resource group `rg-day1-bear` is hardcoded in the workflow and the parameter file.
 
-### Azure prerequisites (one-time setup)
+### Azure prerequisites (one-time bootstrap)
 
-The `infra` and `deploy` jobs authenticate to Azure via OIDC (no passwords).  
-This requires a **federated identity credential** to exist on the Azure AD app registration.
+The `infra` and `deploy` jobs authenticate to Azure via OIDC (passwordless — no client secrets in GitHub).  
+The app registration, service principal, and federated identity credential **do not need to exist beforehand** — the bootstrap workflow creates everything.
 
-#### Automated setup (recommended)
+#### Step 1 — Create a temporary admin service principal
 
-A dedicated workflow automates this one-time step:
-
-1. Create a **temporary client secret** on the app registration (Azure Portal → App Registrations → *your app* → Certificates & secrets → New client secret).
-2. Add four secrets to the GitHub repository (**Settings → Secrets and variables → Actions**):
-   | Secret name | Value |
-   |---|---|
-   | `AZURE_CLIENT_ID` | Application (client) ID |
-   | `AZURE_TENANT_ID` | Azure AD Tenant ID |
-   | `AZURE_SUBSCRIPTION_ID` | Azure Subscription ID |
-   | `AZURE_CLIENT_SECRET` | The temporary client secret from step 1 |
-3. Go to **Actions → "Setup Azure OIDC Federated Credential" → Run workflow**, type `yes` in the confirmation field, and click **Run workflow**.
-4. Once the workflow succeeds, **delete the `AZURE_CLIENT_SECRET`** secret from the repository — it is no longer needed.
-5. The main deployment workflow will now authenticate via OIDC.
-
-#### Manual setup (alternative)
-
-Run the following Azure CLI command locally (requires `Application Administrator` or app **Owner** rights):
+This is the only manual step (done once in Azure Portal or Azure CLI):
 
 ```sh
-az ad app federated-credential create \
-  --id "<AZURE_CLIENT_ID>" \
-  --parameters '{
-    "name": "github-actions-main",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:SkillAcademyAB/StrivoApp:ref:refs/heads/main",
-    "audiences": ["api://AzureADTokenExchange"]
-  }'
+# Creates a SP with Contributor + User Access Administrator scoped to the
+# resource group only.  The "Application Administrator" Entra ID directory
+# role must also be assigned manually in the Azure Portal after this
+# (Entra ID → Roles and administrators → Application Administrator →
+# Add assignments → select "StrivoApp-bootstrap").
+SUBSCRIPTION_ID="<your-subscription-id>"
+RG="rg-day1-bear"
+
+az ad sp create-for-rbac \
+  --name "StrivoApp-bootstrap" \
+  --role "Contributor" \
+  --scopes "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG"
+
+# Also grant User Access Administrator so the workflow can assign
+# the Contributor role to the new DemoIaCApp service principal:
+BOOTSTRAP_OBJ_ID=$(az ad sp show --display-name "StrivoApp-bootstrap" \
+                     --query id -o tsv)
+az role assignment create \
+  --assignee "$BOOTSTRAP_OBJ_ID" \
+  --role "User Access Administrator" \
+  --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG"
 ```
 
-3. **Assign the `Contributor` role** to the service principal on the `rg-day1-bear` resource group.
-4. Add the three OIDC secrets above to the GitHub repository.
+Then **manually** assign the **Application Administrator** directory role in the Azure Portal:
+Entra ID → Roles and administrators → Application Administrator → Add assignments → select `StrivoApp-bootstrap`.
+
+Note the `az ad sp create-for-rbac` output values (`appId`, `password`, `tenant`).
+
+#### Step 2 — Add bootstrap secrets to the repository
+
+Go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret name | Value |
+|---|---|
+| `AZURE_ADMIN_CLIENT_ID` | `appId` from Step 1 |
+| `AZURE_ADMIN_CLIENT_SECRET` | `password` from Step 1 |
+| `AZURE_TENANT_ID` | `tenant` from Step 1 (or Azure AD → Overview → Tenant ID) |
+| `AZURE_SUBSCRIPTION_ID` | Subscription → Overview → Subscription ID |
+
+#### Step 3 — Run the bootstrap workflow
+
+1. Go to **Actions → Bootstrap Azure Identity → Run workflow**.
+2. Keep the default app name (`DemoIaCApp`) or change it.
+3. Type **`yes`** in the confirm field and click **Run workflow**.
+
+The workflow will create:
+- An Entra ID app registration (`DemoIaCApp`)
+- Its service principal
+- A `Contributor` role assignment on `rg-day1-bear`
+- A federated identity credential for the `main` branch
+
+At the end of the run the job log prints:
+
+```
+AZURE_CLIENT_ID = <appId>
+```
+
+#### Step 4 — Add the final secret
+
+Add the `AZURE_CLIENT_ID` value printed above as a repository secret:
+
+| Secret name | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | App registration client ID printed by the bootstrap workflow |
+
+#### Step 5 — Done
+
+Push to `main` (or manually trigger the deployment workflow).  
+The `infra` and `deploy` jobs will now authenticate via OIDC automatically.
+
+> The `AZURE_ADMIN_CLIENT_ID` and `AZURE_ADMIN_CLIENT_SECRET` secrets can be deleted after the bootstrap is complete — they are only needed for the one-time setup. Also delete or disable the `StrivoApp-bootstrap` service principal in Azure (Entra ID → App registrations → StrivoApp-bootstrap → Delete) to fully remove the elevated privileges.
+
+#### Bicep alternative (`infra/aad-app.bicep`)
+
+`infra/aad-app.bicep` declares the same app registration and service principal using the **Microsoft Graph Bicep extensibility provider** (Bicep CLI ≥ 0.33, preview feature).  
+This can be deployed with:
+
+```sh
+az deployment sub create \
+  --location swedencentral \
+  --template-file infra/aad-app.bicep
+```
+
+> **Note:** `Microsoft.Azure.ActiveDirectory/b2cApplications` is the Azure AD **B2C** resource type and is not applicable here — OIDC federation for GitHub Actions uses standard Entra ID, which is managed via the `Microsoft.Graph` provider.
 
 ---
 
@@ -162,9 +220,11 @@ az ad app federated-credential create \
 
 ## Next steps (suggested order)
 
-- [ ] Add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` secrets to the repository (manual — GitHub Settings).
-- [ ] Create federated credential using the **Setup Azure OIDC Federated Credential** workflow (see Azure prerequisites above).
-- [ ] Assign `Contributor` role to the service principal on the `rg-day1-bear` resource group.
+- [ ] Create a temporary admin service principal (Step 1 above) and add the four bootstrap secrets to the repository.
+- [ ] Run the **Bootstrap Azure Identity** workflow with `confirm=yes` to create the app registration, service principal, role assignment, and federated credential.
+- [ ] Add the `AZURE_CLIENT_ID` output value as a repository secret.
 - [ ] Trigger the main deployment workflow on `main` to validate the Bicep deployment end-to-end.
+- [ ] Delete the `AZURE_ADMIN_CLIENT_ID` and `AZURE_ADMIN_CLIENT_SECRET` secrets once bootstrap is complete.
+- [ ] Delete or disable the `StrivoApp-bootstrap` service principal in Azure (Entra ID → App registrations → StrivoApp-bootstrap → Delete) to fully remove the elevated privileges from Azure.
 - [ ] Open a GitHub Issue to track environment promotion (`dev` → `staging` → `production` with separate `.bicepparam` files and workflow environment gates).
 - [ ] Open a GitHub Issue to track Key Vault integration for sensitive app settings.

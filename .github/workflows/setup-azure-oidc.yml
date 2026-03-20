@@ -1,75 +1,182 @@
-# One-time bootstrap workflow that creates the federated identity credential on
-# the Azure AD app registration so that the main deployment workflow can use
-# OIDC (passwordless) authentication.
+# Bootstrap workflow — creates the Azure AD app registration, service
+# principal, Contributor role assignment, and OIDC federated credential
+# needed by the main CI/CD pipeline.  Run this once; the app registration
+# does NOT need to exist beforehand.
 #
-# Prerequisites (add these to Settings → Secrets and variables → Actions):
-#   AZURE_CLIENT_ID       – Application (client) ID of the app registration
-#   AZURE_TENANT_ID       – Azure AD tenant ID
-#   AZURE_SUBSCRIPTION_ID – Azure subscription ID
-#   AZURE_CLIENT_SECRET   – A temporary client secret on the app registration
-#                           (needed only for this one-time setup; can be deleted
-#                            after the federated credential is in place)
+# Prerequisites — add these four secrets to the repository
+# (Settings → Secrets and variables → Actions → New repository secret):
+#
+#   AZURE_ADMIN_CLIENT_ID     – client ID of a service principal that has
+#                               the "Application Administrator" directory
+#                               role in Entra ID AND "Contributor" +
+#                               "User Access Administrator" on the target
+#                               resource group (see README for setup steps).
+#   AZURE_ADMIN_CLIENT_SECRET – client secret for the admin SP above.
+#   AZURE_TENANT_ID           – Entra ID tenant ID.
+#   AZURE_SUBSCRIPTION_ID     – Azure subscription ID.
 #
 # How to run:
 #   1. Add the four secrets listed above to the repository.
-#   2. Go to Actions → "Setup Azure OIDC Federated Credential" → Run workflow.
-#   3. Type "yes" in the confirmation prompt and click "Run workflow".
-#   4. After the workflow succeeds, delete the AZURE_CLIENT_SECRET secret.
-#   5. The main deployment workflow will now authenticate via OIDC.
+#   2. Go to Actions → "Bootstrap Azure Identity" → Run workflow.
+#   3. Optionally change the app name (default: DemoIaCApp).
+#   4. Type "yes" in the confirm field and click Run workflow.
+#   5. Copy the AZURE_CLIENT_ID printed in the job summary.
+#   6. Add it as a new repository secret named AZURE_CLIENT_ID.
+#   7. The main deployment workflow will now authenticate via OIDC.
 
-name: Setup Azure OIDC Federated Credential
+name: Bootstrap Azure Identity
 
 on:
   workflow_dispatch:
     inputs:
+      app_name:
+        description: 'Display name for the new Entra ID app registration'
+        required: true
+        default: 'DemoIaCApp'
+      resource_group:
+        description: 'Resource group to assign the Contributor role on'
+        required: true
+        default: 'rg-day1-bear'
       confirm:
         description: >
-          Type "yes" to create (or update) the federated identity credential on
-          the Azure AD app registration. Any other value is a no-op dry-run.
+          Type "yes" to create the app registration, service principal,
+          role assignment, and federated credential.
+          Any other value is a no-op dry-run.
         required: true
         default: 'no'
 
 jobs:
-  setup:
+  bootstrap:
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      - name: Log in to Azure (client secret)
+      - name: Log in to Azure (admin credentials)
         run: |
           az login \
             --service-principal \
-            --username "${{ secrets.AZURE_CLIENT_ID }}" \
-            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --username "${{ secrets.AZURE_ADMIN_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_ADMIN_CLIENT_SECRET }}" \
             --tenant  "${{ secrets.AZURE_TENANT_ID }}"
           az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
+      # ── Dry-run ──────────────────────────────────────────────────────────
+      - name: Dry-run preview
+        if: ${{ github.event.inputs.confirm != 'yes' }}
+        run: |
+          echo "Dry-run: no changes will be made."
+          echo ""
+          echo "Resources that would be created:"
+          echo "  Entra ID app registration : ${{ github.event.inputs.app_name }}"
+          echo "  Service principal         : (derived from app registration)"
+          echo "  Role assignment           : Contributor on ${{ github.event.inputs.resource_group }}"
+          echo "  Federated credential:"
+          echo "    issuer  : https://token.actions.githubusercontent.com"
+          echo "    subject : repo:${{ github.repository }}:ref:refs/heads/main"
+          echo ""
+          echo "Re-run with confirm=yes to apply."
+
+      # ── Create app registration ──────────────────────────────────────────
+      - name: Create app registration
+        if: ${{ github.event.inputs.confirm == 'yes' }}
+        id: create-app
+        run: |
+          APP_NAME="${{ github.event.inputs.app_name }}"
+
+          EXISTING=$(az ad app list --display-name "$APP_NAME" \
+                       --query "[0].appId" -o tsv 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "App '$APP_NAME' already exists (appId: $EXISTING). Reusing it."
+            APP_ID="$EXISTING"
+          else
+            APP_ID=$(az ad app create --display-name "$APP_NAME" \
+                       --query appId -o tsv)
+            echo "Created app registration '$APP_NAME' (appId: $APP_ID)."
+          fi
+
+          echo "app_id=$APP_ID" >> "$GITHUB_OUTPUT"
+
+      # ── Create service principal ─────────────────────────────────────────
+      - name: Create service principal
+        if: ${{ github.event.inputs.confirm == 'yes' }}
+        run: |
+          APP_ID="${{ steps.create-app.outputs.app_id }}"
+
+          EXISTING_SP=$(az ad sp show --id "$APP_ID" \
+                          --query id -o tsv 2>/dev/null || true)
+          if [ -n "$EXISTING_SP" ]; then
+            echo "Service principal already exists (objectId: $EXISTING_SP)."
+          else
+            az ad sp create --id "$APP_ID"
+            echo "Created service principal."
+          fi
+
+      # ── Assign Contributor role ──────────────────────────────────────────
+      - name: Assign Contributor role on resource group
+        if: ${{ github.event.inputs.confirm == 'yes' }}
+        run: |
+          APP_ID="${{ steps.create-app.outputs.app_id }}"
+          SP_OBJ_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+          SCOPE="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ github.event.inputs.resource_group }}"
+
+          EXISTING_RA=$(az role assignment list \
+                          --assignee "$SP_OBJ_ID" \
+                          --role Contributor \
+                          --scope "$SCOPE" \
+                          --query "[0].id" -o tsv 2>/dev/null || true)
+          if [ -n "$EXISTING_RA" ]; then
+            echo "Contributor role assignment already exists."
+          else
+            az role assignment create \
+              --assignee "$SP_OBJ_ID" \
+              --role Contributor \
+              --scope "$SCOPE"
+            echo "Assigned Contributor role on ${{ github.event.inputs.resource_group }}."
+          fi
+
+      # ── Create federated credential ──────────────────────────────────────
       - name: Create federated identity credential
         if: ${{ github.event.inputs.confirm == 'yes' }}
         run: |
-          az ad app federated-credential create \
-            --id "${{ secrets.AZURE_CLIENT_ID }}" \
-            --parameters '{
-              "name": "github-actions-main",
-              "issuer": "https://token.actions.githubusercontent.com",
-              "subject": "repo:${{ github.repository }}:ref:refs/heads/main",
-              "description": "Allow GitHub Actions on the main branch to authenticate via OIDC",
-              "audiences": ["api://AzureADTokenExchange"]
-            }'
-          echo "Federated credential created successfully."
-          echo "You can now delete the AZURE_CLIENT_SECRET secret from this repository."
+          APP_ID="${{ steps.create-app.outputs.app_id }}"
+          SUBJECT="repo:${{ github.repository }}:ref:refs/heads/main"
 
-      - name: Dry-run (confirm was not 'yes')
-        if: ${{ github.event.inputs.confirm != 'yes' }}
+          EXISTING_FIC=$(az ad app federated-credential list --id "$APP_ID" \
+                           --query "[?subject=='$SUBJECT'].id" \
+                           -o tsv 2>/dev/null || true)
+          if [ -n "$EXISTING_FIC" ]; then
+            echo "Federated credential for '$SUBJECT' already exists."
+          else
+            az ad app federated-credential create \
+              --id "$APP_ID" \
+              --parameters "{
+                \"name\": \"github-actions-main\",
+                \"issuer\": \"https://token.actions.githubusercontent.com\",
+                \"subject\": \"$SUBJECT\",
+                \"description\": \"Allow GitHub Actions on the main branch to authenticate via OIDC\",
+                \"audiences\": [\"api://AzureADTokenExchange\"]
+              }"
+            echo "Created federated identity credential."
+          fi
+
+      # ── Print next steps ─────────────────────────────────────────────────
+      - name: Print next steps
+        if: ${{ github.event.inputs.confirm == 'yes' }}
         run: |
-          echo "Dry-run: no changes were made."
-          echo "Re-run with confirm=yes to create the federated credential."
+          APP_ID="${{ steps.create-app.outputs.app_id }}"
+          echo "================================================================"
+          echo "Bootstrap complete!"
           echo ""
-          echo "The following federated credential would be created:"
-          echo "  name:    github-actions-main"
-          echo "  issuer:  https://token.actions.githubusercontent.com"
-          echo "  subject: repo:${{ github.repository }}:ref:refs/heads/main"
+          echo "Add the following secret to this repository"
+          echo "(Settings → Secrets and variables → Actions):"
+          echo ""
+          echo "  AZURE_CLIENT_ID = $APP_ID"
+          echo ""
+          echo "AZURE_TENANT_ID and AZURE_SUBSCRIPTION_ID should already be set."
+          echo "Once AZURE_CLIENT_ID is added the main deployment workflow will"
+          echo "authenticate to Azure via OIDC automatically."
+          echo "================================================================"
 
       - name: Log out of Azure
         if: always()
