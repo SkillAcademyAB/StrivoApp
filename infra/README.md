@@ -115,7 +115,16 @@ The app registration, service principal, and federated identity credential **do 
 
 #### Step 1 — Create a temporary admin service principal
 
-This is the only manual step (done once in Azure Portal or Azure CLI):
+**Recommended: use the helper script** (handles all CLI commands and labels output clearly):
+
+```sh
+./scripts/create-bootstrap-sp.sh <your-subscription-id> rg-day1-bear
+```
+
+The script prints a ready-to-copy table of the four GitHub secret values and warns you about the common mistake described below.
+
+<details>
+<summary>Manual alternative (Azure CLI commands)</summary>
 
 ```sh
 # Creates a SP with Contributor + User Access Administrator scoped to the
@@ -145,6 +154,20 @@ Then **manually** assign the **Application Administrator** directory role in the
 Entra ID → Roles and administrators → Application Administrator → Add assignments → select `StrivoApp-bootstrap`.
 
 Note the `az ad sp create-for-rbac` output values (`appId`, `password`, `tenant`).
+</details>
+
+> ⚠️ **Common mistake — Secret ID vs Secret Value**
+>
+> Azure client secrets have **two separate identifiers**:
+>
+> | Identifier | What it looks like | What to store |
+> |---|---|---|
+> | **Secret ID** | UUID, e.g. `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | ❌ Do NOT use this |
+> | **Secret Value** | Alphanumeric string shown once at creation | ✅ This is `AZURE_ADMIN_CLIENT_SECRET` |
+>
+> In the Azure Portal, "Certificates & secrets" shows both columns — always copy from the **Value** column, not the **Secret ID** column.  From the CLI, the `password` field in the `az ad sp create-for-rbac` JSON output is the secret value.
+>
+> Storing a Secret ID instead of the Secret Value causes the `AADSTS7000215: Invalid client secret provided` error.  If you have already done this and no longer have the original value, create a new secret in the Azure Portal (App registrations → your app → Certificates & secrets → New client secret) and update the `AZURE_ADMIN_CLIENT_SECRET` repository secret with the new **Value**.
 
 #### Step 2 — Add bootstrap secrets to the repository
 
@@ -153,7 +176,7 @@ Go to **Settings → Secrets and variables → Actions → New repository secret
 | Secret name | Value |
 |---|---|
 | `AZURE_ADMIN_CLIENT_ID` | `appId` from Step 1 |
-| `AZURE_ADMIN_CLIENT_SECRET` | `password` from Step 1 |
+| `AZURE_ADMIN_CLIENT_SECRET` | `password` from Step 1 — the **secret value**, not the Secret ID UUID |
 | `AZURE_TENANT_ID` | `tenant` from Step 1 (or Azure AD → Overview → Tenant ID) |
 | `AZURE_SUBSCRIPTION_ID` | Subscription → Overview → Subscription ID |
 
