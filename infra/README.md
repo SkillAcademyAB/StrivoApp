@@ -11,10 +11,12 @@ The goal is to make the infrastructure **reproducible, version-controlled, and a
 
 | Concern | Status |
 |---|---|
-| App build & deploy | ✅ GitHub Actions workflow exists (`main_dataconsumerdemo.yml`) |
-| Infrastructure provisioning | 🆕 Bicep template added (`infra/main.bicep`) |
-| IaC deployment in CI/CD | 🆕 `infra` job added to the existing workflow |
-| App Service Plan | ⚠️ Referenced by external resource ID — see [open decisions](#open-decisions) |
+| App build & deploy | ✅ GitHub Actions workflow (`main_dataconsumerdemo.yml`) |
+| Infrastructure provisioning | ✅ Bicep template (`infra/main.bicep`) |
+| IaC deployment in CI/CD | ✅ `infra` job wired into the pipeline |
+| App Service Plan | ✅ Shared external plan `asp-dataconsumer` in `rg-day1-bear` |
+| OIDC authentication | ✅ All three jobs use `azure/login@v2` — no long-lived secrets |
+| Parameter file | ✅ `infra/main.bicepparam` holds all production values |
 
 ---
 
@@ -27,6 +29,7 @@ StrivoApp/
 │       └── main_dataconsumerdemo.yml   # CI/CD pipeline (build → infra → deploy)
 ├── infra/
 │   ├── main.bicep                      # Azure Web App + config resources
+│   ├── main.bicepparam                 # Production parameter values
 │   └── README.md                       # This file
 └── src/
     └── StrivoApp.Api/                  # ASP.NET Core 10 application
@@ -41,17 +44,19 @@ StrivoApp/
 | Resource type | Name | Purpose |
 |---|---|---|
 | `Microsoft.Web/sites` | `DataConsumerDemo` | The App Service Web App |
-| `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `ftp` | FTP publishing policy |
-| `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `scm` | SCM (Kudu) publishing policy |
+| `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `ftp` | FTP publishing policy (disabled) |
+| `Microsoft.Web/sites/basicPublishingCredentialsPolicies` | `scm` | SCM (Kudu) publishing policy (disabled) |
 | `Microsoft.Web/sites/config` | `web` | App Service configuration (runtime, TLS, etc.) |
 
 ### Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
-| `siteName` | `DataConsumerDemo` | Web App name — override per environment |
+| `siteName` | `DataConsumerDemo` | Web App name |
 | `appServicePlanId` | _(required)_ | Resource ID of the App Service Plan to use |
 | `location` | `Sweden Central` | Azure region |
+
+Production values are supplied by `infra/main.bicepparam`.
 
 ### Key configuration choices
 
@@ -79,54 +84,56 @@ push → main
          │
          ▼
     ┌─────────┐
-    │  infra  │  az deployment group create (Bicep)
+    │  infra  │  Bicep --what-if preview, then incremental deploy to rg-day1-bear
     └────┬────┘
          │
          ▼
     ┌─────────┐
-    │  deploy │  azure/webapps-deploy → app artifact
+    │  deploy │  azure/webapps-deploy (OIDC, no publish-profile)
     └─────────┘
 ```
 
-### Required GitHub Secrets / Variables
+### Required GitHub Secrets
 
-| Name | Type | Purpose |
-|---|---|---|
-| `AZURE_CLIENT_ID` | Secret | Service principal / workload identity client ID |
-| `AZURE_TENANT_ID` | Secret | Azure AD tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Secret | Target Azure subscription |
-| `AZURE_RESOURCE_GROUP` | Variable | Resource group that hosts the Web App |
-| `APP_SERVICE_PLAN_ID` | Variable | Full resource ID of the App Service Plan |
-| `AZUREAPPSERVICE_PUBLISHPROFILE_*` | Secret | Publish profile for app deployment (existing) |
+These three secrets must be added to the repository (**Settings → Secrets and variables → Actions → New repository secret**):
 
-> **Recommended**: Replace the publish-profile secret with **OIDC / federated credentials** (`azure/login@v2`) for a secretless authentication flow. The `infra` job already uses OIDC.
+| Secret name | Where to find it |
+|---|---|
+| `AZURE_CLIENT_ID` | App registration → Overview → Application (client) ID |
+| `AZURE_TENANT_ID` | Azure Active Directory → Overview → Tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Subscription → Overview → Subscription ID |
+
+> No `AZURE_RESOURCE_GROUP` variable is needed — the resource group `rg-day1-bear` is hardcoded in the workflow and the parameter file.
+
+### Azure prerequisites (one-time setup)
+
+1. **Create or reuse a service principal / app registration** in Azure AD.
+2. **Add a federated credential** on the app registration:
+   - *Issuer*: `https://token.actions.githubusercontent.com`
+   - *Subject*: `repo:SkillAcademyAB/StrivoApp:ref:refs/heads/main`
+   - *Audience*: `api://AzureADTokenExchange`
+3. **Assign the `Contributor` role** to the service principal on the `rg-day1-bear` resource group.
+4. Add the three secrets above to the GitHub repository.
 
 ---
 
-## Open decisions
+## Decisions made
 
-1. **App Service Plan ownership** — The current template references an _existing_ plan by resource ID.  
-   Options:
-   - Keep it external (shared plan, lower cost).
-   - Add a `Microsoft.Web/serverfarms` resource to `main.bicep` so the plan is also managed as code.
-
-2. **Environment promotion** — Should we have `dev` → `staging` → `production` stages?  
-   This can be modelled with Bicep parameter files (`main.dev.bicepparam`, `main.prod.bicepparam`) and workflow environment gates.
-
-3. **Secrets management** — Consider moving app settings into **Azure Key Vault** and referencing them as Key Vault references from the App Service configuration.
-
-4. **Publish profile vs. OIDC** — The deploy job still uses a publish-profile secret. Migrating to `azure/login` with OIDC removes the need to rotate that secret.
-
-5. **Resource group creation** — The pipeline assumes the resource group already exists. A `az group create --if-not-exists` step (or a separate Bicep subscription-scoped deployment) can make the pipeline fully self-contained.
+| # | Decision | Choice |
+|---|---|---|
+| 1 | App Service Plan ownership | External/shared — `asp-dataconsumer` in `rg-day1-bear` |
+| 2 | Authentication method | OIDC throughout — no publish-profile or passwords |
+| 3 | Resource group | Existing `rg-day1-bear` — hardcoded for clarity |
+| 4 | Bicep parameters | Single `main.bicepparam` file for production |
+| 5 | Environment promotion | Deferred — tracked in [issue](https://github.com/SkillAcademyAB/StrivoApp/issues) |
+| 6 | Key Vault secrets management | Deferred for a later iteration |
 
 ---
 
 ## Next steps (suggested order)
 
-- [ ] Add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, and `APP_SERVICE_PLAN_ID` to the repository secrets/variables.
-- [ ] Run the workflow on a feature branch to validate the Bicep deployment (`what-if` mode first).
-- [ ] Decide whether to own the App Service Plan in Bicep (see open decision 1).
-- [ ] Add Bicep parameter files per environment.
-- [ ] Replace publish-profile authentication with OIDC.
-- [ ] Add Key Vault integration for sensitive app settings.
-- [ ] Consider adding a `Microsoft.Web/serverfarms` (App Service Plan) resource to the template.
+- [ ] Add `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` secrets to the repository (manual — GitHub Settings).
+- [ ] Create federated credential on the service principal and assign `Contributor` role (see Azure prerequisites above).
+- [ ] Trigger the workflow on this branch to validate the Bicep deployment end-to-end.
+- [ ] Open a GitHub Issue to track environment promotion (`dev` → `staging` → `production` with separate `.bicepparam` files and workflow environment gates).
+- [ ] Open a GitHub Issue to track Key Vault integration for sensitive app settings.
